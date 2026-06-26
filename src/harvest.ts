@@ -48,7 +48,8 @@ export function buildHarvestPrompt(input: HarvestInput): { system: string; user:
     : "";
   const user =
     `${TOOLS_DOC}\n\nGOAL: ${input.goal}\nSITE: ${input.site}\nCATEGORY: ${input.category || "(none)"}\n` +
-    `PROVIDED FIELD KEYS (reference as $key): ${input.fieldKeys.join(", ") || "(none)"}\n${seed}\n` +
+    `PROVIDED FIELD KEYS (reference as $key): ${["targetUrl", ...input.fieldKeys].join(", ")}\n` +
+    `(the apply URL is always available as $targetUrl — the first step is usually goto { url: "$targetUrl" })\n${seed}\n` +
     `PAGE:\n${input.digest}\n\n` +
     `NOTE: put structural navigation (goto, clicks to reach the form, waits) in "steps". Do NOT fill the form fields here — that is done adaptively. Put the SUBMIT control's selector in "submit_selector" (it is withheld in dry-run).\n` +
     `Return JSON: { "name": string, "description": string, "params": { [key]: {"type":"string","description":string} }, "steps": [ {"tool","args","set?"} ], "submit_selector": string }`;

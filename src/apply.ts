@@ -144,8 +144,10 @@ export async function runApply(req: ApplyRequest, cfg: ApplyConfig, deps: ApplyD
       harvested = true;
     }
 
-    // 3. run structural steps (self-healing)
-    const ran = await runStepsWithSelfHeal(macro, req.fields, session, deps.llm);
+    // 3. run structural steps (self-healing). `targetUrl` is always available
+    // as a step param (the macro's goto references it as $targetUrl).
+    const params = { targetUrl: req.targetUrl, ...req.fields };
+    const ran = await runStepsWithSelfHeal(macro, params, session, deps.llm);
     macro = ran.macro;
 
     // 4. fieldmap fills the live form
