@@ -27,8 +27,14 @@ interface FakeOpts {
   failTool?: { name: string; times: number };
 }
 
-function fakeSession(url: string, opts: FakeOpts = {}): Session & { calls: Record<string, unknown[][]> } {
-  const calls: Record<string, unknown[][]> = { fill: [], click: [], tool: [] };
+interface CallLog {
+  tool: unknown[][];
+  fill: unknown[][];
+  click: unknown[][];
+}
+
+function fakeSession(url: string, opts: FakeOpts = {}): Session & { calls: CallLog } {
+  const calls: CallLog = { fill: [], click: [], tool: [] };
   let failsLeft = opts.failTool?.times ?? 0;
   const tools: ToolRegistry = new Proxy(
     {},
