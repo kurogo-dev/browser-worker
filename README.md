@@ -1,59 +1,94 @@
 # browser-worker
 
-A small, self-contained **browser-automation worker** you scaffold into a project
-and build upon. It exposes an HTTP API, queues each request as a task, drives a
-real browser (Playwright) to perform the task, and reports steps + screenshots.
-A **4-gate dry-run safety check** stops it from performing a real, irreversible
-action (a form submit, a purchase, a destructive click) until every gate passes.
+A self-contained, **standalone** browser-automation worker. You hook it to a DB
+and it **harvests, replays, and self-heals** browser macros on its own — no
+external orchestrator. Built as a Kurogo module template: a starting point you
+scaffold (`template.instantiate`) and customize.
 
-This is a **template** — a starting point, not a finished service. After
-`template.instantiate`, the files are your own editable code. Customize them.
+It exposes an HTTP API, queues each apply as a task, drives a real browser
+(Playwright) to fill and (when armed) submit a form, and reports the result. A
+**4-gate dry-run safety check** stops a real, irreversible submit until every
+gate passes.
 
-## What you customize (in order)
+## The model: per-site macros, categories above, adaptive fields
 
-1. **`src/strategy.ts`** — the form-fill / interaction strategy. This is the
-   heart of the worker: given a page and a job's `fields`, decide what to type,
-   click, and select. One strategy per *form type* (a job board, a checkout, a
-   signup). Start with the stub and grow it.
-2. **`manifest.json`** — the worker's identity, its HTTP endpoints, the macro
-   each endpoint runs, and (optionally) API keys. An empty `api_keys` list is
-   open (dev only).
-3. **`src/safety.ts`** — the 4 gates (`dry_run`, target allowlist, required
-   fields, arm token). Defaults are deliberately conservative; tune them for
-   your use case, but keep them — they are what stop a bad submit.
+- **A macro is per-WEBSITE** (one macro covers every page/ad on a site) — keyed
+  by `site`. A site's form structure is stable across its ads, so the macro
+  replays cheaply with no LLM.
+- **Categories group sites** by platform (the ATS family). A category carries
+  detection *signatures* (URL globs + DOM fingerprints) and an optional
+  *skeleton* that **seeds harvesting** a new site in that family. A
+  category-level macro (`site = "*"`) can serve every site in a uniform platform.
+- **Per-ad variation** (custom screening questions) is absorbed by **adaptive
+  field-mapping**: known fields are matched semantically; genuinely novel
+  free-text questions are answered by the LLM from the profile. This is the only
+  LLM use on the hot path.
 
-## What you should NOT need to touch
+## The three loops
 
-- `src/server.ts` — manifest-driven `node:http` API (health, endpoints, task
-  status). No framework.
-- `src/task-store.ts` — `node:sqlite` task lifecycle (`queued → running → done |
-  exited`). Survives a restart.
-- `src/worker.ts` — the drain loop (claims the oldest queued task, runs it).
-- `src/browser.ts` — Playwright wiring + step/screenshot reporting.
+- **harvest** (`src/harvest.ts`) — first time a site has no macro, the LLM drafts
+  one from the live form (seeded by the category skeleton), it's replay-verified
+  in dry-run, then persisted. Build-once.
+- **replay** (`src/macro/executor.ts`) — runs a stored macro's structural steps
+  with no LLM. The hot path.
+- **self-heal** (`src/selfheal.ts`) — when a step's selector drifts, the LLM
+  repairs just that step against the current page; on success a new macro version
+  is persisted. This is what keeps macros alive as sites change.
 
-## Run it
+## What you customize
+
+1. **Categories + signatures** — seed the `categories` table (name, URL/DOM
+   signatures, optional skeleton). This is the landscape map for your use case.
+2. **`manifest.json`** — `worker_id`, `allowed_hosts` (real-submit allowlist),
+   `test_targets` (safe harness bypass), `goal` (handed to harvest).
+3. Macros are **learned, not written** — harvest builds them; you mostly curate.
+
+## HTTP API
+
+- `POST /apply` — bearer auth, `Idempotency-Key` header. Body: `{ "target_url":
+  string, "fields": { ... }, "dry_run"?: boolean, "arm"?: boolean }`. Async: acks
+  `202 { task_id }`; poll `GET /tasks/:id`.
+- `GET /tasks/:id` — status / result.
+- `GET /health`.
+
+`fields` is generic k/v — map your domain profile onto it; the worker stays
+project-agnostic.
+
+## Safety (read before arming anything)
+
+`decideApply()` (`src/safety.ts`) returns `real` only when ALL pass:
+
+| Gate            | Passes when                                              |
+|-----------------|---------------------------------------------------------|
+| dry_run         | the request set `dry_run: false`                        |
+| config          | env `ALLOW_REAL_SUBMIT=1`                                |
+| armed           | the request set `arm: true`                             |
+| host allowed    | the page host ∈ `allowed_hosts`                         |
+
+A configured `test_targets` URL bypasses gates 2–4 (safe harness) but still
+honors an explicit `dry_run: true`. A missing `dry_run` defaults to dry-run.
+
+## Run
 
 ```bash
 npm install
 npx playwright install chromium
-npm run dev          # serves the manifest's endpoints on PORT (default 8080)
+ANTHROPIC_API_KEY=… ALLOW_REAL_SUBMIT=0 npm run dev   # node >= 22
 ```
 
-Then POST a job to an endpoint (see `manifest.json`) and poll `/tasks/:id`.
-By default `dry_run` is on: the worker fills the form and reports what it WOULD
-submit, but does not submit. Pass `"arm": true` (and clear the other gates) to
-perform the real action.
+Env: `PORT`, `API_TOKEN`, `ALLOW_REAL_SUBMIT`, `ANTHROPIC_API_KEY`, `LLM_MODEL`,
+`MACRO_DB`, `TASKS_DB`, `CONFIG`.
 
-## The safety model (read before you arm anything)
+## State & deploy
 
-`decideAction()` returns `submit` only when **all** gates pass:
+`MACRO_DB` (default `./data/worker.sqlite`) holds the **learned macros — the
+worker's crown jewels**. Deploy it on a **persistent volume and back it up**;
+losing it means re-harvesting every site. `better-sqlite3` is native (single-VM
+deploy).
 
-| Gate            | Passes when                                                        |
-|-----------------|--------------------------------------------------------------------|
-| `dry_run`       | the request explicitly set `dry_run: false`                        |
-| target allowed  | the page URL host is in `manifest.allowed_hosts`                   |
-| required fields | every field the strategy marked required was filled               |
-| arm token       | the request carried `arm: true` (an explicit, per-request opt-in)  |
+## Test
 
-Any gate failing → the worker reports `would_submit` with the captured form
-state and screenshots, and exits the task cleanly. No silent real submits.
+```bash
+npm test                                   # unit + component (no browser)
+SMOKE=1 npx vitest run src/smoke.live.test.ts   # live Playwright glue (needs chromium)
+```
