@@ -38,5 +38,5 @@ export async function repairStep(input: RepairInput, llm: Llm): Promise<MacroSte
   const { system, user } = buildRepairPrompt(input);
   const text = await llm.complete({ system, user, maxTokens: 512 });
   const raw = parseJsonResponse<unknown>(text);
-  return MacroStepSchema.parse(raw);
+  return MacroStepSchema.parse(raw) as MacroStep;
 }
