@@ -1,0 +1,16 @@
+{
+  "worker_id": "example-worker",
+  "role": "form-filler",
+  "description": "Example: open a job URL, fill the application form, and (when armed) submit. Customize src/strategy.ts for your form type.",
+  "allowed_hosts": ["localhost", "127.0.0.1"],
+  "endpoints": [
+    {
+      "path": "/apply",
+      "method": "POST",
+      "macro_id": "apply_v1",
+      "params_schema": { "type": "object", "required": ["target_url", "fields"] },
+      "description": "Open {target_url}, fill the form from {fields}, dry-run by default."
+    }
+  ],
+  "auth": { "api_keys": [] }
+}
