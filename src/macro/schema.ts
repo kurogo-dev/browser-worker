@@ -5,15 +5,15 @@
  * executor.
  */
 import { z } from "zod";
-import type { Macro, MacroParamDef, MacroStep } from "./types.js";
+import type { Macro } from "./types.js";
 
-export const MacroParamDefSchema: z.ZodType<MacroParamDef> = z.object({
+export const MacroParamDefSchema = z.object({
   type: z.enum(["string", "number", "boolean", "object", "array"]),
   description: z.string(),
   secret: z.boolean().optional(),
 });
 
-export const MacroStepSchema: z.ZodType<MacroStep> = z.object({
+export const MacroStepSchema = z.object({
   tool: z.string().min(1),
   args: z.record(z.string(), z.unknown()),
   set: z.string().min(1).optional(),

@@ -11,7 +11,8 @@ const pass: SafetyInput = {
 
 describe("decideApply (4-gate)", () => {
   it("defaults a missing dryRun to dry-run", () => {
-    expect(decideApply({ ...pass, dryRun: undefined })).toEqual({
+    const { dryRun, ...noDryRun } = pass;
+    expect(decideApply(noDryRun)).toEqual({
       mode: "dry_run",
       reason: "caller_requested_dry_run",
     });
