@@ -1,35 +1,27 @@
 /**
- * Worker manifest — the worker's identity, its HTTP endpoints, and its safety
- * allowlist. Loaded once at boot from manifest.json. Edit manifest.json, not
- * this file (this only declares the shape).
+ * Static worker config (manifest.json). The dynamic state — categories +
+ * harvested macros — lives in the DB; this file holds only the deploy-time
+ * knobs. Edit manifest.json, not this (this just shapes + loads it).
  */
 import { readFileSync } from "node:fs";
 
-export interface WorkerEndpoint {
-  path: string;
-  method: string;
-  macro_id: string;
-  params_schema: { type: string; required?: string[] };
-  description?: string;
-}
-
-export interface WorkerManifest {
+export interface WorkerConfig {
   worker_id: string;
-  role: string;
-  description?: string;
-  /** Hosts the worker is allowed to act on (safety gate 2). */
+  /** Hosts the worker may perform a REAL submit on (safety gate 4). */
   allowed_hosts: string[];
-  endpoints: WorkerEndpoint[];
-  auth: { api_keys: string[] };
+  /** URL fragments marking a safe test harness (safety bypass). */
+  test_targets: string[];
+  /** Goal text handed to harvest when building a new site macro. */
+  goal: string;
 }
 
-export function loadManifest(path: string): WorkerManifest {
-  const raw = JSON.parse(readFileSync(path, "utf8")) as WorkerManifest;
-  if (!raw.worker_id) throw new Error("manifest_missing_worker_id");
-  if (!Array.isArray(raw.endpoints) || raw.endpoints.length === 0) {
-    throw new Error("manifest_needs_at_least_one_endpoint");
-  }
-  raw.allowed_hosts ??= [];
-  raw.auth ??= { api_keys: [] };
-  return raw;
+export function loadConfig(path: string): WorkerConfig {
+  const raw = JSON.parse(readFileSync(path, "utf8")) as Partial<WorkerConfig>;
+  if (!raw.worker_id) throw new Error("config_missing_worker_id");
+  return {
+    worker_id: raw.worker_id,
+    allowed_hosts: raw.allowed_hosts ?? [],
+    test_targets: raw.test_targets ?? [],
+    goal: raw.goal ?? "Fill and submit the application form.",
+  };
 }

@@ -1,24 +1,32 @@
 /**
- * Worker HTTP API — manifest-driven, node:http, no framework.
+ * Worker HTTP API — generic, node:http, no framework.
  *
- *   GET  /health           open liveness + identity
- *   POST <endpoint.path>   auth → validate body → enqueue task
- *   GET  /tasks/:id        auth → task status / result / reason
+ *   GET  /health         open liveness + identity
+ *   POST /apply          bearer → validate → (idempotent) enqueue → 202 {task_id}
+ *   GET  /tasks/:id      bearer → task status / result / reason
  *
- * Async: POST returns `{task_id}` immediately (202); the worker drains the
- * queue. Auth is server-to-server bearer. An empty api_keys list means open
- * (dev only).
+ * Async by default: POST acks immediately; the worker drains the queue and runs
+ * the apply. `Idempotency-Key` makes a retry return the same task. Auth is a
+ * server-to-server bearer (empty token = open, dev only). The body is generic
+ * (`target_url` + `fields` k/v) — NO project-specific shape.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { WorkerEndpoint, WorkerManifest } from "./manifest.js";
 import type { TaskStore } from "./task-store.js";
 
-export interface WorkerServerDeps {
-  manifest: WorkerManifest;
-  store: TaskStore;
+export interface ServerConfig {
+  /** Bearer token callers must present. Empty string = open (dev only). */
+  apiToken: string;
+  workerId: string;
 }
 
-const MAX_BODY_BYTES = 1_000_000;
+export interface ServerDeps {
+  config: ServerConfig;
+  store: TaskStore;
+  /** key → task_id map for in-flight idempotent dedup. */
+  idempotency: Map<string, string>;
+}
+
+const MAX_BODY_BYTES = 2_000_000;
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json" });
@@ -38,23 +46,15 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-function authorized(req: IncomingMessage, manifest: WorkerManifest): boolean {
-  const keys = manifest.auth.api_keys;
-  if (keys.length === 0) return true; // open (dev)
+function authorized(req: IncomingMessage, token: string): boolean {
+  if (token.length === 0) return true; // open (dev)
   const header = req.headers.authorization ?? "";
-  const match = /^Bearer\s+(.+)$/i.exec(Array.isArray(header) ? (header[0] ?? "") : header);
-  return match !== null && keys.includes(match[1]!);
+  const m = /^Bearer\s+(.+)$/i.exec(Array.isArray(header) ? (header[0] ?? "") : header);
+  return m !== null && m[1] === token;
 }
 
-function missingRequired(endpoint: WorkerEndpoint, body: Record<string, unknown>): string[] {
-  const required = endpoint.params_schema.required;
-  if (!Array.isArray(required)) return [];
-  return required.filter((k): k is string => typeof k === "string" && !(k in body));
-}
-
-export function createWorkerServer(deps: WorkerServerDeps): Server {
-  const { manifest, store } = deps;
-  const endpoints = new Map(manifest.endpoints.map((e) => [e.path, e]));
+export function createWorkerServer(deps: ServerDeps): Server {
+  const { config, store, idempotency } = deps;
 
   return createServer((req, res) => {
     void handle(req, res).catch((err) => {
@@ -68,13 +68,13 @@ export function createWorkerServer(deps: WorkerServerDeps): Server {
     const method = req.method ?? "GET";
 
     if (method === "GET" && path === "/health") {
-      send(res, 200, { ok: true, worker_id: manifest.worker_id, role: manifest.role });
+      send(res, 200, { ok: true, worker_id: config.workerId });
       return;
     }
 
     const taskMatch = /^\/tasks\/([^/]+)$/.exec(path);
     if (method === "GET" && taskMatch) {
-      if (!authorized(req, manifest)) return send(res, 401, { error: "unauthorized" });
+      if (!authorized(req, config.apiToken)) return send(res, 401, { error: "unauthorized" });
       const task = store.get(taskMatch[1]!);
       if (!task) return send(res, 404, { error: "task_not_found" });
       return send(res, 200, {
@@ -87,9 +87,14 @@ export function createWorkerServer(deps: WorkerServerDeps): Server {
       });
     }
 
-    const endpoint = endpoints.get(path);
-    if (method === "POST" && endpoint) {
-      if (!authorized(req, manifest)) return send(res, 401, { error: "unauthorized" });
+    if (method === "POST" && path === "/apply") {
+      if (!authorized(req, config.apiToken)) return send(res, 401, { error: "unauthorized" });
+
+      const idemKey = (req.headers["idempotency-key"] as string | undefined) ?? "";
+      if (idemKey && idempotency.has(idemKey)) {
+        return send(res, 202, { task_id: idempotency.get(idemKey), status: "queued", idempotent: true });
+      }
+
       let body: unknown;
       try {
         body = await readJson(req);
@@ -99,10 +104,17 @@ export function createWorkerServer(deps: WorkerServerDeps): Server {
       if (typeof body !== "object" || body === null || Array.isArray(body)) {
         return send(res, 400, { error: "body_must_be_object" });
       }
-      const params = body as Record<string, unknown>;
-      const missing = missingRequired(endpoint, params);
-      if (missing.length > 0) return send(res, 400, { error: "missing_params", missing });
-      const task = store.create({ endpoint: endpoint.path, macro_id: endpoint.macro_id, params });
+      const b = body as Record<string, unknown>;
+      const targetUrl = typeof b.target_url === "string" ? b.target_url : "";
+      if (!targetUrl) return send(res, 400, { error: "missing_param:target_url" });
+      const fields = b.fields && typeof b.fields === "object" && !Array.isArray(b.fields) ? b.fields : {};
+
+      const task = store.create({
+        endpoint: "/apply",
+        macro_id: "apply",
+        params: { target_url: targetUrl, fields, dry_run: b.dry_run, arm: b.arm, idempotency_key: idemKey },
+      });
+      if (idemKey) idempotency.set(idemKey, task.task_id);
       return send(res, 202, { task_id: task.task_id, status: task.status });
     }
 

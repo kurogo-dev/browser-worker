@@ -10,16 +10,29 @@
 import { chromium, type Browser, type Page } from "playwright";
 import type { PageProbe } from "./classify.js";
 import type { FormField } from "./fieldmap.js";
+import type { Session } from "./apply.js";
+import { makePlaywrightTools } from "./macro/tools.js";
 
-export interface Session {
-  page: Page;
-  close: () => Promise<void>;
-}
-
-export async function launchSession(): Promise<Session> {
+/** Open a real browser session navigated to `targetUrl`, implementing the
+ *  `Session` interface apply.runApply drives. Navigates immediately so classify
+ *  sees the loaded page. */
+export async function makePlaywrightSession(targetUrl: string): Promise<Session> {
   const browser: Browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
-  return { page, close: async () => { await browser.close().catch(() => {}); } };
+  await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+  return {
+    url: () => page.url(),
+    has: async (selector) => (await page.locator(selector).count()) > 0,
+    readForm: () => readForm(page),
+    digest: () => domDigest(page),
+    tools: makePlaywrightTools(page),
+    fill: async (selector, value) => { await page.locator(selector).first().fill(value, { timeout: 8000 }); },
+    click: async (selector) => { await page.locator(selector).first().click({ timeout: 8000 }); },
+    screenshot: async () => {
+      try { return (await page.screenshot({ type: "png" })).toString("base64"); } catch { return undefined; }
+    },
+    close: async () => { await browser.close().catch(() => {}); },
+  };
 }
 
 export function pageProbe(page: Page): PageProbe {
