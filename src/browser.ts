@@ -1,85 +1,83 @@
 /**
- * Browser wiring + step/screenshot reporting. Launches Playwright Chromium,
- * navigates to the job's target_url, delegates field-filling to the strategy,
- * runs the 4-gate safety check, and either submits (armed) or reports what it
- * WOULD submit (dry-run). Returns a structured outcome the worker stores.
- *
- * Reporting: every meaningful step is captured (label + screenshot as base64)
- * so the result is auditable — you can see exactly what the worker saw and did.
+ * Browser session + page inspection helpers. The only place (besides
+ * macro/tools.ts) that touches Playwright. Provides:
+ *   - launchSession(): a Chromium page + teardown
+ *   - pageProbe(page): the PageProbe classify needs (url + selector presence)
+ *   - readForm(page): the live form's fields → FormField[] for fieldmap
+ *   - domDigest(page): a token-bounded summary of the visible form for the LLM
+ *     (harvest / self-heal) — NOT raw HTML
  */
-import { chromium, type Browser } from "playwright";
-import { fillForm } from "./strategy.js";
-import { decideAction } from "./safety.js";
-import type { WorkerManifest } from "./manifest.js";
-import type { TaskRow } from "./task-store.js";
-import type { MacroOutcome } from "./worker.js";
+import { chromium, type Browser, type Page } from "playwright";
+import type { PageProbe } from "./classify.js";
+import type { FormField } from "./fieldmap.js";
 
-export interface Step {
-  label: string;
-  at: string;
-  screenshot_b64?: string;
+export interface Session {
+  page: Page;
+  close: () => Promise<void>;
 }
 
-/** Build the executor the worker drains tasks through. Closes over the manifest
- *  (for the allowed-hosts gate). */
-export function makeExecutor(manifest: WorkerManifest): (task: TaskRow) => Promise<MacroOutcome> {
-  return async (task: TaskRow): Promise<MacroOutcome> => {
-    const params = task.params;
-    const targetUrl = typeof params.target_url === "string" ? params.target_url : "";
-    const fields = (params.fields ?? {}) as Record<string, unknown>;
-    if (!targetUrl) return { ok: false, reason: "missing_param:target_url" };
+export async function launchSession(): Promise<Session> {
+  const browser: Browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  return { page, close: async () => { await browser.close().catch(() => {}); } };
+}
 
-    const steps: Step[] = [];
-    let browser: Browser | null = null;
-    try {
-      browser = await chromium.launch({ headless: true });
-      const page = await browser.newPage();
-
-      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
-      steps.push(await snap(page, "loaded"));
-
-      const fill = await fillForm(page, fields);
-      steps.push(await snap(page, `filled ${fill.filledFields.length} field(s)`));
-
-      const decision = decideAction(params, {
-        pageUrl: page.url(),
-        allowedHosts: manifest.allowed_hosts,
-        requiredFields: fill.requiredFields,
-        filledFields: fill.filledFields,
-      });
-
-      if (decision.action === "submit") {
-        await fill.submit();
-        steps.push(await snap(page, "submitted"));
-        return { ok: true, result: { submitted: true, target_url: targetUrl, filled: fill.filledFields, steps } };
-      }
-
-      // Dry-run: report what it WOULD do, with the captured state.
-      return {
-        ok: true,
-        result: {
-          submitted: false,
-          would_submit: fill.submitDescription,
-          failed_gates: decision.failed_gates,
-          target_url: targetUrl,
-          filled: fill.filledFields,
-          steps,
-        },
-      };
-    } catch (err) {
-      return { ok: false, reason: `browser_error:${err instanceof Error ? err.message : String(err)}` };
-    } finally {
-      await browser?.close().catch(() => {});
-    }
+export function pageProbe(page: Page): PageProbe {
+  return {
+    url: page.url(),
+    has: async (selector) => (await page.locator(selector).count()) > 0,
   };
 }
 
-async function snap(page: import("playwright").Page, label: string): Promise<Step> {
-  let screenshot_b64: string | undefined;
-  try {
-    screenshot_b64 = (await page.screenshot({ type: "png" })).toString("base64");
-  } catch {
-    screenshot_b64 = undefined;
-  }
-  return { label, at: new Date().toISOString(), ...(screenshot_b64 ? { screenshot_b64 } : {}) };
+/** Extract the page's fillable fields with a best-effort human label. */
+export async function readForm(page: Page): Promise<FormField[]> {
+  return page.evaluate(() => {
+    function labelFor(el: Element): string {
+      const id = el.getAttribute("id");
+      if (id) {
+        const lab = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+        if (lab?.textContent) return lab.textContent.trim();
+      }
+      const wrap = el.closest("label");
+      if (wrap?.textContent) return wrap.textContent.trim();
+      return (
+        el.getAttribute("aria-label") ||
+        el.getAttribute("placeholder") ||
+        el.getAttribute("name") ||
+        el.getAttribute("id") ||
+        ""
+      );
+    }
+    function cssPath(el: Element): string {
+      const id = el.getAttribute("id");
+      if (id) return `#${CSS.escape(id)}`;
+      const name = el.getAttribute("name");
+      if (name) return `${el.tagName.toLowerCase()}[name="${name}"]`;
+      return el.tagName.toLowerCase();
+    }
+    const out: Array<{ selector: string; label: string; type: string; required: boolean }> = [];
+    const els = document.querySelectorAll("input, textarea, select");
+    els.forEach((el) => {
+      const tag = el.tagName.toLowerCase();
+      const t = tag === "input" ? (el.getAttribute("type") || "text").toLowerCase() : tag === "textarea" ? "textarea" : "select";
+      if (["hidden", "submit", "button", "reset", "image"].includes(t)) return;
+      out.push({
+        selector: cssPath(el),
+        label: labelFor(el).replace(/\s+/g, " ").slice(0, 120),
+        type: t,
+        required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true",
+      });
+    });
+    return out;
+  });
+}
+
+/** A compact, token-bounded description of the form for the LLM. */
+export async function domDigest(page: Page): Promise<string> {
+  const fields = await readForm(page);
+  const lines = fields.map(
+    (f) => `- ${f.type}${f.required ? " (required)" : ""} | label="${f.label}" | selector=${f.selector}`,
+  );
+  const title = await page.title().catch(() => "");
+  return `URL: ${page.url()}\nTITLE: ${title}\nFORM FIELDS (${fields.length}):\n${lines.join("\n")}`;
 }

@@ -26,6 +26,7 @@ export const MacroSchema: z.ZodType<Macro> = z.object({
   category: z.string().default(""),
   params: z.record(z.string(), MacroParamDefSchema).default({}),
   steps: z.array(MacroStepSchema).min(1),
+  submit_selector: z.string().min(1).optional(),
   version: z.number().int().positive().default(1),
   enabled: z.boolean().default(true),
   created_at: z.string(),

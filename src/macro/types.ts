@@ -32,7 +32,13 @@ export interface Macro {
   /** Grouping category (the ATS/platform family). Empty when uncategorized. */
   category: string;
   params: Record<string, MacroParamDef>;
+  /** Structural navigation to reach the submit-ready state (goto, clicks,
+   *  waits). The field fills are done adaptively by fieldmap, not here, so the
+   *  macro stays robust across a site's ads. */
   steps: MacroStep[];
+  /** The submit control. Performing it is gated by the 4-gate safety check; it
+   *  is NOT one of `steps` precisely so it can be withheld in dry-run. */
+  submit_selector?: string;
   version: number;
   enabled: boolean;
   created_at: string;
