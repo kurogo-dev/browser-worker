@@ -1,55 +1,61 @@
 /**
- * 4-gate dry-run safety. The single decision point between "filled the form" and
- * "performed the real, irreversible action". `decideAction` returns `"submit"`
- * ONLY when every gate passes; otherwise `"dry_run"` with the failing gates.
+ * 4-gate dry-run safety — the one decision point between "filled the form" and
+ * "performed the real, irreversible submit". `decideApply` returns `real` ONLY
+ * when every gate passes, each with a stable, machine-readable reason code so a
+ * caller/log scraper can tell exactly which gate stopped a real submit.
  *
- * Keep all four gates. They are deliberately conservative — the default is to
- * NOT submit. This is what stops a bug or a bad input from silently doing
- * something real (a job application, a purchase, a destructive click).
+ * Gates (in priority order — honoring an explicit dry-run request is the most
+ * important, so it is reported first):
+ *   1. `dryRun === false`              — caller explicitly opted out of dry-run
+ *   2. `allowRealConfig === true`      — worker config flag (env ALLOW_REAL_SUBMIT=1)
+ *   3. `armed === true`                — per-request explicit authorization
+ *   4. host ∈ `allowedHosts`           — target host is allowlisted
+ *
+ * One short-circuit only: a configured TEST target bypasses gates 2–4 (so the
+ * dummy harness can exercise a real submit), but STILL honors an explicit
+ * `dryRun: true`. `dryRun` defaults to `true` when undefined — a missing flag
+ * must NEVER be read as consent to submit.
  */
-export interface ActionRequest {
-  /** The request must explicitly opt OUT of dry-run (false) to allow a submit. */
-  dry_run?: boolean;
-  /** Per-request explicit opt-in to perform the real action. */
-  arm?: boolean;
-}
+export type ApplyMode = "dry_run" | "real";
 
-export interface SafetyContext {
-  /** The page URL the action would target. */
-  pageUrl: string;
-  /** Hosts the worker is allowed to act on (from the manifest). */
+export type DryRunReason =
+  | "caller_requested_dry_run"
+  | "config_disallows_real"
+  | "not_armed"
+  | "host_not_allowed";
+
+export interface SafetyInput {
+  /** Caller-supplied flag. Undefined is treated as `true` (safe default). */
+  dryRun?: boolean;
+  /** Worker-side config gate (e.g. process.env.ALLOW_REAL_SUBMIT === "1"). */
+  allowRealConfig: boolean;
+  /** Per-request explicit authorization to perform the real action. */
+  armed: boolean;
+  /** Host the action targets. */
+  host: string;
+  /** Allowlisted hosts. */
   allowedHosts: string[];
-  /** Field keys the strategy marked required. */
-  requiredFields: string[];
-  /** Field keys the strategy actually filled. */
-  filledFields: string[];
+  /** True when the target is a configured safe test harness (gate bypass). */
+  testTarget?: boolean;
 }
 
-export type ActionDecision =
-  | { action: "submit" }
-  | { action: "dry_run"; failed_gates: string[] };
+export interface SafetyDecision {
+  mode: ApplyMode;
+  /** Present iff mode === "dry_run": which gate forced dry-run. */
+  reason?: DryRunReason;
+  /** Present iff mode === "real" AND gates 2–4 were bypassed (test target). */
+  bypassed?: boolean;
+}
 
-export function decideAction(req: ActionRequest, ctx: SafetyContext): ActionDecision {
-  const failed: string[] = [];
+export function decideApply(input: SafetyInput): SafetyDecision {
+  const dryRun = input.dryRun === undefined ? true : input.dryRun;
 
-  // Gate 1 — dry_run is on unless the caller explicitly set it false.
-  if (req.dry_run !== false) failed.push("dry_run_not_disabled");
+  // Test-target bypass — the only short-circuit. Still honors explicit dry-run.
+  if (dryRun !== true && input.testTarget) return { mode: "real", bypassed: true };
 
-  // Gate 2 — the target host must be allowlisted.
-  let host = "";
-  try {
-    host = new URL(ctx.pageUrl).hostname;
-  } catch {
-    host = "";
-  }
-  if (!host || !ctx.allowedHosts.includes(host)) failed.push(`host_not_allowed:${host || "invalid_url"}`);
-
-  // Gate 3 — every required field must have been filled.
-  const missing = ctx.requiredFields.filter((k) => !ctx.filledFields.includes(k));
-  if (missing.length > 0) failed.push(`missing_required:${missing.join(",")}`);
-
-  // Gate 4 — an explicit per-request arm flag.
-  if (req.arm !== true) failed.push("not_armed");
-
-  return failed.length === 0 ? { action: "submit" } : { action: "dry_run", failed_gates: failed };
+  if (dryRun !== false) return { mode: "dry_run", reason: "caller_requested_dry_run" };
+  if (!input.allowRealConfig) return { mode: "dry_run", reason: "config_disallows_real" };
+  if (!input.armed) return { mode: "dry_run", reason: "not_armed" };
+  if (!input.allowedHosts.includes(input.host)) return { mode: "dry_run", reason: "host_not_allowed" };
+  return { mode: "real" };
 }
