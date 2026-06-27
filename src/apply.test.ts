@@ -131,6 +131,32 @@ describe("runApply", () => {
     expect(saved!.site).toBe("jobs.acme.se");
   });
 
+  it("specializes a category skeleton to the site when there is NO llm (deterministic harvest)", async () => {
+    const session = fakeSession("https://jobs.acme.se/jobs/7", { form });
+    let saved: Macro | null = null;
+    const skeleton = macro({ site: "*", name: "apply", category: "teamtailor" });
+    const deps: ApplyDeps = {
+      resolveMacro: () => null,
+      getSkeleton: () => skeleton,
+      putMacro: (m) => { saved = m; },
+      openSession: async () => session,
+      // no llm
+    };
+    const res = await runApply({ targetUrl: "https://jobs.acme.se/jobs/7", fields: { email: "a@b.se" } }, cfg, deps);
+    expect(res.harvested).toBe(true);
+    expect(saved).not.toBeNull();
+    expect(saved!.site).toBe("jobs.acme.se"); // specialized from "*" to the live host
+    expect(res.trace).toBeDefined();
+  });
+
+  it("throws no_macro_and_no_llm_to_harvest when no macro, no llm, and no skeleton", async () => {
+    const session = fakeSession("https://jobs.acme.se/jobs/8", { form });
+    const deps: ApplyDeps = { resolveMacro: () => null, putMacro: () => {}, openSession: async () => session };
+    await expect(
+      runApply({ targetUrl: "https://jobs.acme.se/jobs/8", fields: {} }, cfg, deps),
+    ).rejects.toThrow(/no_macro_and_no_llm_to_harvest/);
+  });
+
   it("self-heals a drifted step and persists the new version", async () => {
     const session = fakeSession("https://jobs.acme.se/jobs/3", { form, failTool: { name: "click", times: 1 } });
     const m = macro({ steps: [{ tool: "click", args: { selector: "#old" } }], version: 2 });

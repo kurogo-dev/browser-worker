@@ -69,6 +69,10 @@ export interface ApplyResult {
   would_submit?: string;
   gates: SafetyDecision;
   screenshot?: string;
+  /** Per-step execution trace (observability). */
+  trace?: unknown[];
+  /** The substitution param keys available to the macro (debugging). */
+  params_keys?: string[];
 }
 
 function makeNovelAnswerer(llm: Llm): NovelAnswerer {
@@ -92,10 +96,10 @@ async function runStepsWithSelfHeal(
   params: Record<string, unknown>,
   session: Session,
   llm: Llm | undefined,
-): Promise<{ macro: Macro; healed: boolean }> {
+): Promise<{ macro: Macro; healed: boolean; trace: unknown[] }> {
   try {
-    await executeMacro(macro, params, session.tools);
-    return { macro, healed: false };
+    const r = await executeMacro(macro, params, session.tools);
+    return { macro, healed: false, trace: r.trace };
   } catch (err) {
     if (!(err instanceof StepError) || !llm) throw err;
     const digest = await session.digest();
@@ -114,9 +118,18 @@ async function runStepsWithSelfHeal(
       version: macro.version + 1,
       updated_at: new Date().toISOString(),
     };
-    await executeMacro(patched, params, session.tools); // retry once — throws if still broken
-    return { macro: patched, healed: true };
+    const r2 = await executeMacro(patched, params, session.tools); // retry once — throws if still broken
+    return { macro: patched, healed: true, trace: r2.trace };
   }
+}
+
+/** Specialize a category skeleton to a concrete site. The deterministic harvest
+ *  path when no LLM is available: the skeleton (site "*") is materialized as the
+ *  per-site macro (its `site` rewritten to the live host) so resolveMacro's
+ *  exact-site lookup hits it next time — build-once/replay-many without an LLM. */
+function specializeSkeleton(skeleton: Macro, site: string): Macro {
+  const now = new Date().toISOString();
+  return { ...skeleton, site, enabled: true, created_at: now, updated_at: now };
 }
 
 export async function runApply(req: ApplyRequest, cfg: ApplyConfig, deps: ApplyDeps): Promise<ApplyResult> {
@@ -129,24 +142,35 @@ export async function runApply(req: ApplyRequest, cfg: ApplyConfig, deps: ApplyD
     let macro = deps.resolveMacro(cls.site, cls.category, cfg.macroName);
     let harvested = false;
     if (!macro) {
-      if (!deps.llm) throw new Error("no_macro_and_no_llm_to_harvest");
-      macro = await draftMacro(
-        {
-          site: cls.site,
-          category: cls.category,
-          goal: cfg.goal,
-          digest: await session.digest(),
-          fieldKeys: Object.keys(req.fields),
-          ...(deps.getSkeleton ? { skeleton: deps.getSkeleton(cls.category) } : {}),
-        },
-        deps.llm,
-      );
-      harvested = true;
+      if (deps.llm) {
+        // LLM-driven harvest (the primary path).
+        macro = await draftMacro(
+          {
+            site: cls.site,
+            category: cls.category,
+            goal: cfg.goal,
+            digest: await session.digest(),
+            fieldKeys: Object.keys(req.fields),
+            ...(deps.getSkeleton ? { skeleton: deps.getSkeleton(cls.category) } : {}),
+          },
+          deps.llm,
+        );
+        harvested = true;
+      } else {
+        // Deterministic fallback: if the classified category ships a skeleton,
+        // materialize it as the per-site macro. Satisfies build-once/replay-many
+        // for sites with hand-written skeletons even with NO LLM key provisioned.
+        const skeleton = deps.getSkeleton ? deps.getSkeleton(cls.category) : null;
+        if (!skeleton) throw new Error("no_macro_and_no_llm_to_harvest");
+        macro = specializeSkeleton(skeleton, cls.site);
+        harvested = true;
+      }
     }
 
-    // 3. run structural steps (self-healing). `targetUrl` is always available
-    // as a step param (the macro's goto references it as $targetUrl).
-    const params = { targetUrl: req.targetUrl, ...req.fields };
+    // 3. run structural steps (self-healing). The target URL is always available
+    // as a step param under BOTH camelCase ($targetUrl, LLM-drafted macros) and
+    // snake_case ($target_url, hand-written skeletons) — either works.
+    const params = { targetUrl: req.targetUrl, target_url: req.targetUrl, ...req.fields };
     const ran = await runStepsWithSelfHeal(macro, params, session, deps.llm);
     macro = ran.macro;
 
@@ -191,6 +215,8 @@ export async function runApply(req: ApplyRequest, cfg: ApplyConfig, deps: ApplyD
       ...(!submitted && macro.submit_selector ? { would_submit: macro.submit_selector } : {}),
       gates: decision,
       ...(screenshot ? { screenshot } : {}),
+      trace: ran.trace,
+      params_keys: Object.keys(params),
     };
   } finally {
     await session.close();
