@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Standalone autonomous browser-automation worker: per-site macros, category grouping, adaptive field-mapping, harvest/replay/self-heal, 4-gate dry-run safety.",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "node --experimental-strip-types src/index.ts",
@@ -13,7 +15,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.32.1",
     "better-sqlite3": "^11.7.0",
     "playwright": "^1.49.0",
     "zod": "^3.24.1"

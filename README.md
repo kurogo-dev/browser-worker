@@ -73,10 +73,10 @@ honors an explicit `dry_run: true`. A missing `dry_run` defaults to dry-run.
 ```bash
 npm install
 npx playwright install chromium
-ANTHROPIC_API_KEY=… ALLOW_REAL_SUBMIT=0 npm run dev   # node >= 22
+OPENROUTER_API_KEY=… ALLOW_REAL_SUBMIT=0 npm run dev   # node >= 22
 ```
 
-Env: `PORT`, `API_TOKEN`, `ALLOW_REAL_SUBMIT`, `ANTHROPIC_API_KEY`, `LLM_MODEL`,
+Env: `PORT`, `API_TOKEN`, `ALLOW_REAL_SUBMIT`, `OPENROUTER_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL`,
 `MACRO_DB`, `TASKS_DB`, `CONFIG`.
 
 ## State & deploy

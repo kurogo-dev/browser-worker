@@ -4,11 +4,12 @@
  * fieldmap's novel-question answers. The hot path (replaying a known macro)
  * never calls this.
  *
- * Injectable behind the `Llm` interface so every consumer is unit-testable with
- * a stub and the worker has exactly one place that talks to Anthropic.
+ * Routed through OpenRouter (OpenAI-compatible chat-completions). One key, any
+ * model — switch model via LLM_MODEL without touching code. Plain `fetch` (Node
+ * >= 22), so no SDK dependency. Injectable behind the `Llm` interface so every
+ * consumer is unit-testable with a stub and the worker has exactly one place
+ * that talks to a model provider.
  */
-import Anthropic from "@anthropic-ai/sdk";
-
 export interface LlmRequest {
   system: string;
   user: string;
@@ -19,22 +20,40 @@ export interface Llm {
   complete(req: LlmRequest): Promise<string>;
 }
 
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
+const DEFAULT_MODEL = "anthropic/claude-sonnet-4-6";
 
-export function makeAnthropicLlm(apiKey: string, model = process.env.LLM_MODEL ?? DEFAULT_MODEL): Llm {
-  const client = new Anthropic({ apiKey });
+export function makeLlm(
+  apiKey: string,
+  model = process.env.LLM_MODEL ?? DEFAULT_MODEL,
+  baseUrl = process.env.LLM_BASE_URL ?? DEFAULT_BASE_URL,
+): Llm {
   return {
     async complete(req) {
-      const msg = await client.messages.create({
-        model,
-        max_tokens: req.maxTokens ?? 1024,
-        system: req.system,
-        messages: [{ role: "user", content: req.user }],
+      const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          // OpenRouter attribution headers (optional but recommended).
+          "HTTP-Referer": process.env.LLM_REFERER ?? "https://kurogo.dev",
+          "X-Title": "browser-worker",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: req.maxTokens ?? 1024,
+          messages: [
+            { role: "system", content: req.system },
+            { role: "user", content: req.user },
+          ],
+        }),
       });
-      return msg.content
-        .filter((b): b is Anthropic.TextBlock => b.type === "text")
-        .map((b) => b.text)
-        .join("");
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        throw new Error(`llm_request_failed:${res.status}:${detail.slice(0, 300)}`);
+      }
+      const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      return body.choices?.[0]?.message?.content ?? "";
     },
   };
 }

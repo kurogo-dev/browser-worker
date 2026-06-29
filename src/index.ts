@@ -12,8 +12,9 @@
  *   TASKS_DB             task DB path (default ./data/tasks.sqlite)
  *   API_TOKEN            bearer token callers must present (empty = open dev)
  *   ALLOW_REAL_SUBMIT    "1" enables real submits (gate 2)
- *   ANTHROPIC_API_KEY    enables harvest / self-heal / novel-answer (cold paths)
- *   LLM_MODEL            override the model (default claude-sonnet-4-6)
+ *   OPENROUTER_API_KEY   enables harvest / self-heal / novel-answer (cold paths)
+ *   LLM_MODEL            override the model (default anthropic/claude-sonnet-4-6)
+ *   LLM_BASE_URL         override the provider (default https://openrouter.ai/api/v1)
  */
 import { loadConfig } from "./manifest.js";
 import { openDb } from "./db.js";
@@ -22,7 +23,7 @@ import { Worker, type MacroOutcome } from "./worker.js";
 import { createWorkerServer } from "./server.js";
 import { makePlaywrightSession } from "./browser.js";
 import { runApply, type ApplyConfig, type ApplyDeps } from "./apply.js";
-import { makeAnthropicLlm, type Llm } from "./llm.js";
+import { makeLlm, type Llm } from "./llm.js";
 import type { TaskRow } from "./task-store.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -35,8 +36,8 @@ const db = openDb(MACRO_DB);
 const store = new TaskStore(TASKS_DB);
 const idempotency = new Map<string, string>();
 
-const apiKey = process.env.ANTHROPIC_API_KEY ?? "";
-const llm: Llm | undefined = apiKey ? makeAnthropicLlm(apiKey) : undefined;
+const apiKey = process.env.OPENROUTER_API_KEY ?? "";
+const llm: Llm | undefined = apiKey ? makeLlm(apiKey) : undefined;
 
 const applyConfig: ApplyConfig = {
   categories: db.listCategories().map((c) => ({ category: c.name, signatures: c.signatures as never })),
