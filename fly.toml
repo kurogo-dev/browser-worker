@@ -1,0 +1,38 @@
+# Template fly.toml for a browser-worker deploy. The app is reached ONLY over
+# Fly's private network (no [http_service] → not public); the API talks to it at
+# http://<app>.internal:8080. Rename `app` per deploy. Stage OPENROUTER_API_KEY +
+# API_TOKEN as Fly secrets AFTER the first deploy creates the app (the worker
+# boots fine without them — they enable LLM cold paths + auth).
+app = "browser-worker"
+primary_region = "arn"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  MACRO_DB = "/app/data/worker.sqlite"
+  TASKS_DB = "/app/data/tasks.sqlite"
+
+[mounts]
+  source = "worker_data"
+  destination = "/app/data"
+
+# Private service + health check on /health. The machine stays up because the
+# worker boots without secrets and serves /health immediately.
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  auto_stop_machines = false
+  min_machines_running = 1
+
+  [[services.http_checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "10s"
+    method = "get"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

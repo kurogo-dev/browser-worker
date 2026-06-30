@@ -1,16 +1,24 @@
 /**
- * Task store — the only durable state the worker owns. An embedded node:sqlite
+ * Task store — the only durable state the worker owns. An embedded better-sqlite3
  * database tracking the async task lifecycle:
  *
  *   queued → running → done | exited(+reason)
  *
  * Near-stateless by design: just task records (status / result / reason) so a
- * caller can poll, and so status survives a restart. node:sqlite is
- * single-threaded, so claimNext's select+update cannot interleave with another
- * claim (no lease/race handling needed within one process).
+ * caller can poll, and so status survives a restart. better-sqlite3 is
+ * single-threaded + synchronous, so claimNext's select+update cannot interleave
+ * with another claim (no lease/race handling needed within one process).
+ *
+ * Uses better-sqlite3 (the SAME store db.ts uses) — NOT node:sqlite. node:sqlite
+ * (DatabaseSync) is experimental and throws on import unless run with
+ * `--experimental-sqlite` (Node 22/23) or Node ≥24, so a normal container boot
+ * crash-loops before the HTTP server can listen. better-sqlite3 is a prebuilt
+ * native module that works on Node ≥18 with no flags.
  */
 import { randomUUID } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
+import { dirname } from "node:path";
+import { mkdirSync } from "node:fs";
+import Database from "better-sqlite3";
 
 export type TaskStatus = "queued" | "running" | "done" | "exited";
 
@@ -61,10 +69,11 @@ function hydrate(row: RawRow): TaskRow {
 }
 
 export class TaskStore {
-  private readonly db: DatabaseSync;
+  private readonly db: Database.Database;
 
   constructor(path = ":memory:") {
-    this.db = new DatabaseSync(path);
+    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    this.db = new Database(path);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
         task_id    TEXT PRIMARY KEY,

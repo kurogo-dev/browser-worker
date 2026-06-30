@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Standalone autonomous browser-automation worker: per-site macros, category grouping, adaptive field-mapping, harvest/replay/self-heal, 4-gate dry-run safety.",
   "engines": {
-    "node": ">=22"
+    "node": ">=20"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
